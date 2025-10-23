@@ -15,10 +15,10 @@ from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter 
 # import to use standard structure for vector store (Corrected to standard community import)
 from langchain_community.vectorstores import FAISS 
-# Using the new LCEL components instead of RetrievalQA to avoid deployment errors
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
+# Using LCEL components for modern LangChain implementation
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 import asyncio
 
 # Optional features (voice input / TTS / translation)
@@ -1020,19 +1020,13 @@ with chat_tab:
                 max_output_tokens=2048
             )
 
-            # 3. Create the Stuff Documents Chain
-            # This chain takes the retrieved documents and the user's question (under 'input')
-            # and stuffs them all into the LLM's context using the document_combine_prompt.
-            document_chain = create_stuff_documents_chain(
-                llm,
-                document_combine_prompt,
-            )
-
-            # 4. Create the final Retrieval Chain
-            # This chain manages the retrieval step and then passes the results to the document_chain.
-            qa = create_retrieval_chain(
-                retriever,
-                document_chain,
+            # 3. Create LCEL chain using pure LangChain Expression Language
+            # This creates a chain that retrieves documents and processes them with the LLM
+            qa = (
+                {"context": retriever, "input": RunnablePassthrough()}
+                | document_combine_prompt
+                | llm
+                | StrOutputParser()
             )
 
             # --- End RAG Chain Implementation ---
@@ -1043,10 +1037,8 @@ with chat_tab:
             
             with st.spinner("Thinking..."):
                 try:
-                    # Note: The input variable for the LCEL retrieval chain is typically 'input'.
-                    # The output key is 'answer'.
-                    result = qa.invoke({"input": processed_query})
-                    answer = result.get("answer", "")
+                    # LCEL chain expects the input directly as the question
+                    answer = qa.invoke(processed_query)
                 except Exception as run_err:
                     # Use a general exception handler for API/network errors
                     answer = f"There was an error answering the question: {run_err}. Please check your internet connection or API key."
@@ -1256,3 +1248,4 @@ st.markdown(f'''
   </a>
 </div>
 ''', unsafe_allow_html=True)
+
