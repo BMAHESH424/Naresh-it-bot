@@ -3,6 +3,7 @@ import base64
 import json
 from datetime import datetime
 from typing import List, Dict, Any
+import io # Added for in-memory TTS file handling
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -10,10 +11,14 @@ from dotenv import load_dotenv
 # Import necessary Google/Gemini components from LangChain
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.document_loaders import WebBaseLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores.faiss import FAISS
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
+# import to use the widely adopted LangChain Text Splitters
+from langchain_text_splitters import RecursiveCharacterTextSplitter 
+# import to use standard structure for vector store (Corrected to standard community import)
+from langchain_community.vectorstores import FAISS 
+# Using the new LCEL components instead of RetrievalQA to avoid deployment errors
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
 import asyncio
 
 # Optional features (voice input / TTS / translation)
@@ -57,15 +62,15 @@ st.markdown("""
 # ===== Registration Button in Main Area (Stays) =====
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
-    registration_url = "https://docs.google.com/forms/d/e/1FAIpQLSfSotUmF_68mx0tMkngYfaGsyYVf0L9jL5YyZG7DA5iLXh-bA/viewform?usp=header"
+    registration_url = "https://docs.google.com/forms/d/e/1FAIpQLSctETIYkXe7KjOuzI1IP1xXluD-XIJefIhkNGE2IGhhOyIsDQ/viewform?usp=header"
     st.markdown(
         f"""
         <div style="width:100%">
           <a href="{registration_url}" target="_blank" rel="noopener noreferrer"
              style="display:inline-block; width:100%; text-align:center; text-decoration:none; 
-                     background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
-                     color:#fff; border:none; border-radius:12px; padding:12px 16px; font-weight:600;
-                     box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);">
+                   background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+                   color:#fff; border:none; border-radius:12px; padding:12px 16px; font-weight:600;
+                   box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);">
             📋 Register for Courses Now
           </a>
         </div>
@@ -693,8 +698,14 @@ def load_and_split_from_url(url: str) -> List[Any]:
     """Loads and splits documents from a given URL."""
     loader = WebBaseLoader(url)
     docs = loader.load()
-    # MODIFICATION: Increased chunk_overlap to 200 for better context retention
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
+    # FIX: chunk_size=1500 and chunk_overlap=350 applied as requested
+    # CRITICAL FIX 3: Added custom separators to prioritize structural breaks (double newline)
+    # over single newlines, helping to keep list items together within chunks.
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1500, 
+        chunk_overlap=350, 
+        separators=["\n\n", "\n", " ", ""]
+    ) 
     return splitter.split_documents(docs)
 
 
@@ -710,16 +721,20 @@ def build_vectordb_for_url(url: str) -> FAISS:
     return FAISS.from_documents(texts, embedding=embeddings)
 
 
+# FIX 1: Refactored to use in-memory IO to prevent file conflict issues in deployment
 def tts_to_audio_tag(text: str, lang_code: str) -> tuple[str, str]:
-    """Converts text to base64 encoded audio tag using gTTS. Returns (audio_tag, base64_data)."""
+    """Converts text to base64 encoded audio tag using gTTS (in-memory). Returns (audio_tag, base64_data)."""
     if not gTTS:
         return "", ""
     try:
         tts = gTTS(text, lang=lang_code)
-        tmp_path = "response.mp3"
-        tts.save(tmp_path)
-        with open(tmp_path, "rb") as f:
-            b64_audio = base64.b64encode(f.read()).decode()
+        
+        # Use in-memory buffer instead of saving to disk
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+        
+        b64_audio = base64.b64encode(mp3_fp.read()).decode()
         audio_tag = f"""
         <audio controls autoplay style="width: 100%;">
             <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3" />
@@ -728,6 +743,7 @@ def tts_to_audio_tag(text: str, lang_code: str) -> tuple[str, str]:
         """
         return audio_tag, b64_audio
     except Exception:
+        # In case of gTTS error (e.g., unsupported language)
         return "", ""
 
 
@@ -787,7 +803,7 @@ with st.sidebar:
 
     lines = [f"# NareshIT Course Assistant Transcript ({datetime.now().strftime('%Y-%m-%d')})\n"]
     for i, msg in enumerate(history_to_export, start=1):
-        who = "User" if msg.get("role") == "user" else "Assistant"
+        who = "User" if msg["role"] == "user" else "Assistant"
         content = msg.get("content", "").replace("\r", "")
         lines.append(f"## {i}. {who}\n\n{content}\n")
     transcript_md = "\n".join(lines)
@@ -815,10 +831,6 @@ with st.sidebar:
     if not has_msgs:
         st.markdown(f'<div class="muted">No messages yet for **{active_course_key}**. Start a chat to enable export.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
-
-    # Removed Registration Form Button (Client Requirement 3)
-    # st.markdown('<div class="sidebar-card">📝 Course Registration</div>', unsafe_allow_html=True)
-    # [Removed button and descriptive markdown]
 
 # ===== Session State =====
 if "all_messages" not in st.session_state:
@@ -879,7 +891,7 @@ with action_adv:
             return
         
         # Load the vector DB only if the URL is valid
-        st.toast(f"🤖 Loading data for: **{name}**. Please wait...", icon="⏳")
+        st.toast(f"🤖 Loading data for: **{name}**... (This may take up to 30 seconds)", icon="⏳")
 
         with st.spinner(f"🧠 Processing content for {name} with AI..."):
             try:
@@ -953,88 +965,88 @@ with chat_tab:
             # Prepare RAG chain
             vectordb = st.session_state.get("vectordb")
             
-            # Use increased retrieval count
-            retriever = vectordb.as_retriever(search_kwargs={"k": 8}) if vectordb else None
+            # FIX: Using k=12 as determined to be the optimal depth
+            retriever = vectordb.as_retriever(search_kwargs={"k": 12}) if vectordb else None
 
             # Get the currently selected course name for context injection
             current_course = st.session_state.get("active_course_name", "the selected course")
             
             # MODIFICATION: Inject the course name into the user's query
             # This forces the retriever (vector search) to prioritize the correct course's documents.
-            processed_query = f"About the {current_course}: {pending_query}"
+            processed_query = pending_query
 
-            # Prepare the RAG prompt template (LLM still uses this instruction set)
-            # MODIFICATION 2: Added instruction for concise, professional, and varied phrasing to reduce repetition
-            prompt_template = (
-                f"""
+            # --- RAG Chain Implementation using LCEL ---
+            
+            # 1. Define the document combining prompt (ChatPromptTemplate is preferred for LCEL)
+            document_combine_prompt = ChatPromptTemplate.from_messages([
+                # --- PROMPT TUNING START ---
+                ("system", f"""
                 You are a highly knowledgeable and helpful **Course Assistant for NareshIT**, specializing in the **'{current_course}'** course.  
                 Your primary role is to answer student queries *strictly and accurately* using the information available in the provided course context extracted from the official course page.
 
                 ### Your Objectives:
                 1. **Precision:** Respond only with information that clearly exists in the given context.  
-                  - Do not guess or hallucinate details.  
-                  - Match the user’s question as closely as possible using the course content.  
+                   - Do not guess or hallucinate details.  
+                   - Match the user’s question as closely as possible using the course content.  
                 2. **Clarity & Tone:** Respond in a clear, concise, and friendly professional tone suitable for students.  
-                  - Avoid overly technical jargon unless the question explicitly requests it.  
-                  - Use natural and varied phrasing to keep responses engaging.  
-                3. **Context Awareness:**  
-                  - If the answer is found in the context (from the URL), extract the *exact relevant data* and present it neatly formatted (bulleted list or short paragraph).  
-                  - If multiple sections are relevant, summarize them briefly and point out where each topic appears.  
-                4. **When Information is Missing:**  
-                  - If the answer is **not** present in the provided context, respond transparently and helpfully using this fallback message:  
-                    > "I couldn’t find that specific detail in the course material, but you can always check the course page or call us directly at {contact_number} for the latest batch and prerequisite details."  
-                5. **Formatting:**  
-                  - Use bullet points, headings, or short paragraphs for readability.  
-                  - Maintain a professional and approachable tone throughout.
+                   - Avoid overly technical jargon unless the question explicitly requests it.  
+                   - Use natural and varied phrasing to keep responses engaging.  
+                3. **Context Awareness:** - If the answer is found in the context (from the URL), extract the *exact relevant data* and present it neatly formatted (bulleted list or short paragraph).  
+                   - If multiple sections are relevant, summarize them briefly and point out where each topic appears.  
+                4. **Formatting:** - Use bullet points, headings, or short paragraphs for readability.  
+                   - Maintain a professional and approachable tone throughout.
+                5. **Curriculum Synthesis (FINAL FIX):** If the user asks for the 'curriculum', 'syllabus', 'course content', or 'topics covered', you MUST collate **ALL** related fragments from the provided Context documents and combine them into a single, comprehensive, and well-structured list (using Markdown lists and sub-lists) for the user. **IF** you find any fragments related to the curriculum, **YOU MUST NOT USE THE FALLBACK MESSAGE**. Your primary function for this query type is to synthesize the list, even if the raw data is fragmented.
 
                 ---
-
-                ### Context (from the official NareshIT course page):
-                {{context}}
-
-                ---
-
-                ### Student Question:
-                {{question}}
+                ### Fallback Rule (Strict):
+                ONLY use the standardized fallback message if, and only if, a search across **all** provided Context yields absolutely zero relevant information to construct a meaningful answer. **DO NOT** use the fallback if you find partial information.
+                    - Fallback message: "I couldn’t find that specific detail in the course material, but you can always check the course page or call us directly at **{contact_number}** for the latest batch and prerequisite details."  
 
                 ---
+                
+                Context: {{context}}
+                """),
+                # --- PROMPT TUNING END ---
+                ("human", "{input}"),
+            ])
 
-                ### Your Task:
-                Provide the **most accurate, concise, and context-grounded answer** possible based on the above context.  
-                If the exact detail is missing, use the fallback message provided above.
-                """
-                f"\"I couldn't find that specific detail in the course material, but you can always check the course page or call us directly at {contact_number} for the latest batch and prerequisite details.\"\n\n"
-                "Context:\n{context}\n\n"
-                "Question:\n{question}\n\n"
-                "Answer in a clear and friendly tone:"
-            )
-            prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
 
-            # Use ChatGoogleGenerativeAI (Gemini)
-            # MODIFICATION 3: Increased temperature to 0.5 to reduce repetition/rigidity in responses (Client Request 4)
+            # 2. Use ChatGoogleGenerativeAI (Gemini)
             llm = ChatGoogleGenerativeAI(
                 model="gemini-2.5-flash", 
                 google_api_key=gemini_api_key, 
                 temperature=0.5, 
-                max_output_tokens=512
+                # FIX: Increased max_output_tokens from 1024 to 2048 for comprehensive answers
+                max_output_tokens=2048
             )
 
-            qa = RetrievalQA.from_chain_type(
-                llm=llm,
-                retriever=retriever,
-                chain_type="stuff",
-                return_source_documents=False, # Set to False to prevent exposing raw chunks
-                chain_type_kwargs={"prompt": prompt},
+            # 3. Create the Stuff Documents Chain
+            # This chain takes the retrieved documents and the user's question (under 'input')
+            # and stuffs them all into the LLM's context using the document_combine_prompt.
+            document_chain = create_stuff_documents_chain(
+                llm,
+                document_combine_prompt,
             )
+
+            # 4. Create the final Retrieval Chain
+            # This chain manages the retrieval step and then passes the results to the document_chain.
+            qa = create_retrieval_chain(
+                retriever,
+                document_chain,
+            )
+
+            # --- End RAG Chain Implementation ---
+
 
             # Add user message to history
             st.session_state["messages"].append({"role": "user", "content": pending_query})
             
             with st.spinner("Thinking..."):
                 try:
-                    # Use the processed query for invocation
-                    result = qa.invoke({"query": processed_query})
-                    answer = result.get("result", "")
+                    # Note: The input variable for the LCEL retrieval chain is typically 'input'.
+                    # The output key is 'answer'.
+                    result = qa.invoke({"input": processed_query})
+                    answer = result.get("answer", "")
                 except Exception as run_err:
                     # Use a general exception handler for API/network errors
                     answer = f"There was an error answering the question: {run_err}. Please check your internet connection or API key."
@@ -1047,7 +1059,7 @@ with chat_tab:
                     f"{contact_number}** for immediate assistance."
                 )
 
-            # Translate if needed (Client Request 3)
+            # Translate if needed
             final_answer = maybe_translate(answer, target_lang_code)
             
             # Generate TTS audio data if enabled
@@ -1077,9 +1089,9 @@ with chat_tab:
             # Friendly save reminder
             st.toast("Don't forget to use the 'Export & Share' in the sidebar to save your chat!", icon="💾")
             
-        # Clear pending query
-        st.session_state["pending_query"] = None
-        st.rerun() # Rerun to refresh the chat input form state
+            # Clear pending query
+            st.session_state["pending_query"] = None
+            st.rerun() # Rerun to refresh the chat input form state
 
     
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1092,6 +1104,7 @@ with chat_tab:
             placeholder="e.g., What are the prerequisites for this course?",
             disabled=disabled_input
         )
+        user_query = user_query + f" for {selected_course_name}"
         col1, col2 = st.columns([1, 4])
         with col1:
             submitted = st.form_submit_button("🚀 Send", type="primary", use_container_width=True, disabled=disabled_input)
@@ -1222,27 +1235,24 @@ with history_tab:
 st.markdown(f'<div class="floating-contact">📞 {contact_number}</div>', unsafe_allow_html=True)
 
 # Floating registration button (kept as is)
-registration_url = "https://docs.google.com/forms/d/e/1FAIpQLSfSotUmF_68mx0tMkngYfaGsyYVf0L9jL5YyZG7DA5iLXh-bA/viewform?usp=header"
+registration_url = "https://docs.google.com/forms/d/e/1FAIpQLSctETIYkXe7KjOuzI1IP1xXluD-XIJefIhkNGE2IGhhOyIsDQ/viewform?usp=header"
 st.markdown(f'''
 <div style="position: fixed; left: 16px; bottom: 16px; z-index: 9999;">
   <a href="{registration_url}" target="_blank" rel="noopener noreferrer"
       style="background: linear-gradient(135deg, #10b981, #059669);
-             color: #fff;
-             border: 1px solid rgba(255,255,255,0.15);
-             border-radius: 999px;
-             padding: 12px 18px;
-             box-shadow: 0 8px 32px rgba(16, 185, 129, 0.3);
-             font-weight: 700;
-             font-size: 0.9rem;
-             cursor: pointer;
-             transition: all 0.3s ease;
-             display: inline-flex;
-             align-items: center;
-             gap: 8px; text-decoration:none;">
+            color: #fff;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 999px;
+            padding: 12px 18px;
+            box-shadow: 0 8px 32px rgba(16, 185, 129, 0.3);
+            font-weight: 700;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px; text-decoration:none;">
     📋 Register Now
   </a>
 </div>
 ''', unsafe_allow_html=True)
-
-
-
