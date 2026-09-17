@@ -315,6 +315,6 @@ This project demonstrates practical experience with:
 
 AI Engineer | Python | Generative AI | RAG | LangChain | FastAPI
 
-GitHub: https://github.com/yourusername
+GitHub: https://github.com/BMAHESH424
 
-LinkedIn: https://linkedin.com/in/yourprofile
+LinkedIn: www.linkedin.com/in/bonthala-mahesh-a2b178287
